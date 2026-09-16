@@ -1,0 +1,21 @@
+{
+  "format": "m4a-constant-stsz",
+  "input": "\\\\?\\C:\\Users\\username\\Desktop\\watermelon\\.build\\discord-media-lab\\mp4-audio-expanded\\base-faststart.m4a",
+  "output": "media-gen/samples/constant-stsz-178956969.m4a",
+  "input_size": 2254,
+  "output_size": 2198,
+  "input_sha256": "57dd8e1d90de7c8983d09e733c24d7a940498679ba761a2c15abd9273ee0e3ee",
+  "output_sha256": "203f03eb5333c29b5937df220e32e15235bbf6f48c5407ed85e3d4c4ca6329f4",
+  "details": {
+    "moov_at_end": false,
+    "original_sample_count": 14,
+    "projected_avindex_bytes": 4294967256,
+    "projected_table_bytes": 6442450884,
+    "projected_timing_bytes": 2147483628,
+    "removed_explicit_stsz_bytes": 56,
+    "sample_count": 178956969,
+    "sample_size": 1,
+    "stsc_samples_per_chunk": 178956969,
+    "stts_sample_delta": 1024
+  }
+}
