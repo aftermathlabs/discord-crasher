@@ -23,7 +23,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Add the Vorbis delayed-discard trigger to an existing WebM.
+    /// Add a Vorbis discard trigger compatible with old and current Chromium.
     Webm(WebmArgs),
     /// Replace an AAC MP4 sample table with a large constant sample count.
     M4a(M4aArgs),
@@ -40,9 +40,9 @@ struct WebmArgs {
     /// Optional JSON report path.
     #[arg(long, value_name = "FILE")]
     manifest: Option<PathBuf>,
-    /// Front-discard value added to the second target packet.
-    #[arg(long, default_value_t = 1)]
-    second_skip: u64,
+    /// Front-discard value added to the final trigger packet.
+    #[arg(long, visible_alias = "second-skip", default_value_t = 1)]
+    trigger_skip: u64,
     /// Override the codec delay in frames. Normally read from CodecDelay.
     #[arg(long)]
     codec_delay: Option<u64>,
@@ -129,7 +129,7 @@ fn run_webm(args: WebmArgs) -> Result<()> {
     }
     let data = fs::read(&input).with_context(|| format!("reading {}", input.display()))?;
     let options = WebmOptions {
-        second_skip: args.second_skip,
+        trigger_skip: args.trigger_skip,
         codec_delay_frames: args.codec_delay,
         sample_rate: args.sample_rate,
     };
@@ -138,7 +138,7 @@ fn run_webm(args: WebmArgs) -> Result<()> {
     fs::write(&output, &candidate).with_context(|| format!("writing {}", output.display()))?;
 
     let report = Report {
-        format: "webm-vorbis-discard",
+        format: "webm-vorbis-discard-dual",
         input: input.display().to_string(),
         output: output.display().to_string(),
         input_size: data.len(),

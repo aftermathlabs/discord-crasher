@@ -1,0 +1,44 @@
+{
+  "format": "webm-vorbis-discard-dual",
+  "input": "\\\\?\\C:\\Users\\username\\Desktop\\media-gen\\samples\\short-vorbis-dual-control.webm",
+  "output": "samples\\short-vorbis-dual-crash.webm",
+  "input_size": 4185,
+  "output_size": 4206,
+  "input_sha256": "0e27f7783b799364fdeaca662a9c945f38f4b3ad3092294d3290398f177eaa73",
+  "output_sha256": "a0ab9e146c629f037b86612addc1ab6fff9200711d45aa5f5edbb9576cc206ac",
+  "details": {
+    "audio_packet_count": 4,
+    "audio_track": 2,
+    "carrier_output_frames": 576,
+    "carrier_packet": 1,
+    "codec_delay_frames": 128,
+    "codec_id": "A_VORBIS",
+    "current_no_delay_path": {
+      "carried_frames": 129,
+      "check_packet": 2,
+      "large_skip_packet": 1,
+      "packet_0_padding_dropped_without_pcm": true,
+      "positive_trigger_packet": 2
+    },
+    "expected_carry_frames": 129,
+    "expected_check": "discarded 129 > codec_delay 128 before a 1024-frame trigger packet",
+    "expected_check_fails": true,
+    "layout": "dual-immediate-and-delayed",
+    "legacy_delayed_path": {
+      "carried_frames": 129,
+      "check_packet": 2,
+      "large_skip_applied_packet": 1,
+      "large_skip_source_packet": 0,
+      "positive_trigger_source_packet": 1
+    },
+    "priming_packet": 0,
+    "sample_rate": 48000.0,
+    "seek_head_and_cues_replaced_with_void": true,
+    "shared_discard_padding_ns": -12020833,
+    "shared_skip_frames": 577,
+    "trigger_discard_padding_ns": -20833,
+    "trigger_output_frames": 1024,
+    "trigger_packet": 2,
+    "trigger_skip_frames": 1
+  }
+}

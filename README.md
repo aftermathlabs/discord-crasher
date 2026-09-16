@@ -1,17 +1,19 @@
-# Discord Crasher
+# Media parser test-case generator
 
 `media-gen` is a small, dependency-light Rust command-line tool for building two
-media-parser test cases observed in Discord Desktop 1.0.9257 (Electron 42.11.1,
-Chromium 148.0.7778.280). It edits existing valid media files in place; it does
-not invoke FFmpeg, patch Discord, contact a server, or upload anything.
+media-parser test cases. It edits existing valid media files in place; it does
+not invoke FFmpeg, patch a browser, contact a server, or upload anything.
 
-The cases are version-specific. They reproduce the behavior of the pinned
-Discord/Chromium/FFmpeg build used during the investigation; a different browser
-or Discord release may reject the files, handle them safely, or fail differently.
+The WebM case includes a bridge layout for both the older one-buffer-delayed
+Vorbis path and the current immediate-discard path. The checked-in short sample
+was validated with Discord Desktop 1.0.9257 (Electron 42.11.1 / Chromium
+148.0.7778.280) and Chrome 153.0.8010.48. The M4A case remains specific to the
+pinned Discord/FFmpeg build. Other releases may reject these files, handle them
+safely, or fail differently.
 
 | Case | Input | Effect in the affected build | Trigger |
 | --- | --- | --- | --- |
-| WebM/Vorbis delayed discard | Existing WebM with an `A_VORBIS` track | Renderer terminates with `0x80000003` (`STATUS_BREAKPOINT`) in Chromium's `AudioDiscardHelper` release check | Playback/decode; the ordinary attachment view does not autoplay the original WebM |
+| WebM/Vorbis discard bridge | Existing WebM with an `A_VORBIS` track | Renderer terminates with `0x80000003` (`STATUS_BREAKPOINT`) in Chromium's `AudioDiscardHelper` release check on both tested discard modes | Playback/decode; metadata loading alone is not sufficient |
 | M4A constant `stsz` count | Existing fast-start AAC/M4A seed | Renderer transiently allocates about 6.6 GB (6.16 GiB) of private memory while loading metadata | Metadata load after the audio element changes from `preload="none"` to metadata |
 
 These are denial-of-service/resource-consumption test cases, not demonstrated
@@ -66,49 +68,54 @@ cargo run --release -p media-gen -- webm --help
 cargo run --release -p media-gen -- m4a --help
 ```
 
-## WebM/Vorbis delayed-discard crash
+## WebM/Vorbis dual-version discard crash
 
 ### What causes it
 
-The affected Chromium branch carries Matroska `DiscardPadding` metadata between
-Vorbis decode buffers. A Vorbis track with a positive `CodecDelay` can make the
-carried front-discard count exceed the decoder delay. The release build then
-executes the `CHECK_LE` in `AudioDiscardHelper::ProcessBuffers` and terminates
-the renderer.
+Matroska negative `DiscardPadding` becomes a Vorbis front skip. Chromium's older
+Vorbis path delays that metadata by one encoded packet; current Chromium applies
+it to the current decoded output and drops packet 0's metadata when that priming
+packet emits no PCM. Repeating one large skip across packets 0 and 1 bridges the
+two behaviors:
 
-The canonical minimal state is:
+| Audio packet | Decoded PCM | Front skip |
+| ---: | ---: | ---: |
+| 0 | none (Vorbis priming) | 577 frames |
+| 1 | 576 frames | 577 frames |
+| 2 | 1,024 frames | 1 frame |
 
-1. `CodecDelay = 128` frames.
-2. The first crafted audio packet has no decoded PCM, so its front skip is carried.
-3. The next packet supplies 576 frames and receives a 577-frame front skip. After
-   the 128-frame decoder delay is removed, 129 frames remain carried forward.
-4. The following packet applies that carry and reaches the delayed one-frame skip.
-   Chromium checks `discarded_frames <= decoder_delay`, i.e. `129 <= 128`, and
-   the check fails.
+The track has a 128-frame `CodecDelay`. In the older delayed mode, packet 0's
+577-frame skip is applied to packet 1. In the current mode, packet 0's skip is
+dropped and packet 1's identical skip is applied directly. Either way, only 448
+frames can be removed after the decoder-delay offset, so 129 frames carry into
+packet 2. Its positive front skip reaches Chromium's release check after those
+129 frames have already been removed. The required invariant is
+`discarded_frames <= decoder_delay`; `129 <= 128` fails and terminates the
+renderer.
 
-The exact packet sizes depend on the source file. The generator parses the Vorbis
-setup headers, computes decoded packet sizes, and chooses the latest safe
-three-packet window. It then:
+The generator parses the Vorbis setup headers, computes the decoded sizes of
+packets 1 and 2, and fails closed unless the bridge is viable. It then:
 
-- converts the two selected `SimpleBlock` elements to `BlockGroup` elements;
-- adds negative `DiscardPadding` values to the first two target packets;
+- converts the first three audio `SimpleBlock` elements to `BlockGroup` elements;
+- writes shared negative `DiscardPadding` on packets 0 and 1 and a positive
+  one-frame trigger on packet 2;
 - preserves the encoded audio and video payloads; and
 - replaces stale `SeekHead`, `Cues`, and affected cluster CRC elements so the
   rewritten container remains parseable.
 
-For the checked-in five-second tail seed, the generated report contains
-`expected_carry_frames: 257` and `expected_check_fails: true`; its packet skips
-are `1153` and `1` frames. The 7,202-byte minimal reference uses `577` and `1`.
+The manifest reports the immediate and delayed paths separately. For the
+checked-in sample, both paths name packet 2 as the check packet and report
+`expected_carry_frames: 129` and `expected_check_fails: true`.
 
 ### Generate a candidate
 
-The repository contains a suitable control WebM:
+The repository contains a 43 ms, 4,185-byte control WebM:
 
 ```sh
-cargo run --release -p media-gen -- webm \
-  --input tests/discord-still-audio-tail-control.webm \
-  --output .build/media-gen/webm-candidate.webm \
-  --manifest .build/media-gen/webm-candidate.json \
+cargo run --release -- webm \
+  --input samples/short-vorbis-dual-control.webm \
+  --output .build/short-vorbis-dual-crash.webm \
+  --manifest .build/short-vorbis-dual-crash.json \
   --force
 ```
 
@@ -116,18 +123,20 @@ The input must contain:
 
 - an `A_VORBIS` track;
 - a positive `CodecDelay` (normally read from the track); and
-- at least three audio packets near the end whose Vorbis modes can be decoded.
+- at least three audio packets whose Vorbis modes can be decoded;
+- packet 1 output larger than the codec delay; and
+- packet 2 output larger than the computed carry.
 
-Useful options are `--second-skip`, `--codec-delay`, and `--sample-rate`. The
+Useful options are `--trigger-skip`, `--codec-delay`, and `--sample-rate`.
+`--second-skip` remains an alias for the renamed `--trigger-skip` option. The
 defaults are the values needed for the known failure state. The command prints
 the JSON report to stdout and writes the same report to `--manifest` when that
 option is supplied.
 
-With the checked-in control input, the known candidate is 20,018 bytes and has
-SHA-256:
+The checked-in candidate is 43 ms and 4,206 bytes. Its SHA-256 is:
 
 ```text
-c0ea55978a998b405837e4482bb8f786f909647af1bfd993b792c18bcb0a741b
+a0ab9e146c629f037b86612addc1ab6fff9200711d45aa5f5edbb9576cc206ac
 ```
 
 The output hash is expected to change if the input, packet window, or options
@@ -208,4 +217,7 @@ cargo run --release -p media-gen -- m4a \
   --force
 ```
 
-![](samples/short-video-vorbis-crash.webm)
+The matching artifacts are
+[`samples/short-vorbis-dual-control.webm`](samples/short-vorbis-dual-control.webm),
+[`samples/short-vorbis-dual-crash.webm`](samples/short-vorbis-dual-crash.webm),
+and [`samples/short-vorbis-dual-crash.json`](samples/short-vorbis-dual-crash.json).

@@ -62,9 +62,63 @@ struct AudioBlock {
 
 #[derive(Debug, Clone, Default)]
 pub struct WebmOptions {
-    pub second_skip: u64,
+    pub trigger_skip: u64,
     pub codec_delay_frames: Option<u64>,
     pub sample_rate: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DualTriggerPlan {
+    carrier_frames: u64,
+    trigger_frames: u64,
+    shared_skip_frames: u64,
+    carried_frames: u64,
+}
+
+fn dual_trigger_plan(
+    frame_counts: &[Option<u64>],
+    codec_delay: u64,
+    trigger_skip: u64,
+) -> Result<DualTriggerPlan> {
+    ensure!(
+        frame_counts.len() >= 3,
+        "need at least three Vorbis audio blocks"
+    );
+    ensure!(trigger_skip > 0, "--trigger-skip must be positive");
+
+    let carrier_frames =
+        frame_counts[1].context("cannot determine decoded frame count for Vorbis packet 1")?;
+    let trigger_frames =
+        frame_counts[2].context("cannot determine decoded frame count for Vorbis packet 2")?;
+    ensure!(
+        carrier_frames > codec_delay,
+        "Vorbis packet 1 emits {carrier_frames} frames, which does not exceed the {codec_delay}-frame codec delay"
+    );
+
+    // Packet 0 is Vorbis priming and normally emits no PCM. Old Chromium saves
+    // its padding for packet 1, while current Chromium drops it. Repeating the
+    // same large skip on packet 1 makes both paths carry codec_delay + 1 frames
+    // into packet 2, where any positive front skip reaches the fatal CHECK.
+    let shared_skip_frames = carrier_frames
+        .checked_add(1)
+        .context("shared skip overflows u64")?;
+    let usable_carrier_frames = carrier_frames - codec_delay;
+    let carried_frames = shared_skip_frames - usable_carrier_frames;
+    ensure!(
+        carried_frames > codec_delay,
+        "dual trigger does not exceed the codec delay"
+    );
+    ensure!(
+        trigger_frames > carried_frames,
+        "Vorbis packet 2 emits {trigger_frames} frames, but must exceed the {carried_frames}-frame carry"
+    );
+
+    Ok(DualTriggerPlan {
+        carrier_frames,
+        trigger_frames,
+        shared_skip_frames,
+        carried_frames,
+    })
 }
 
 fn vint(data: &[u8], offset: usize, element_id: bool) -> Result<(u64, usize, bool)> {
@@ -864,43 +918,14 @@ pub fn make_candidate(data: &[u8], options: &WebmOptions) -> Result<(Vec<u8>, se
     let scale_ns = timecode_scale(data, &segment_children)?;
     let frame_counts = frame_counts(&blocks, &track.vorbis, scale_ns, sample_rate);
 
-    let mut selected = None;
-    for first in (0..=blocks.len() - 3).rev() {
-        let Some(middle_frames) = frame_counts[first + 1] else {
-            continue;
-        };
-        let Some(trigger_frames) = frame_counts[first + 2] else {
-            continue;
-        };
-        if middle_frames > codec_delay && trigger_frames > 2 * codec_delay + 1 {
-            selected = Some((first, middle_frames, trigger_frames));
-            break;
-        }
-    }
-    let Some((first_index, middle_frames, trigger_frames)) = selected else {
-        bail!(
-            "no late three-packet window has middle > {codec_delay} and trigger > {} frames; supply a WebM with a longer Vorbis tail",
-            2 * codec_delay + 1
-        );
-    };
-    let second_index = first_index + 1;
-    let trigger_index = first_index + 2;
-    ensure!(options.second_skip > 0, "--second-skip must be positive");
-    let first_skip = middle_frames
-        .checked_add(codec_delay)
-        .and_then(|value| value.checked_add(1))
-        .context("first skip overflows u64")?;
-    let (first_padding, first_ns) = discard_padding(first_skip, sample_rate)?;
-    let (second_padding, second_ns) = discard_padding(options.second_skip, sample_rate)?;
-    let expected_carry_frames = first_skip - (middle_frames - codec_delay);
-    ensure!(
-        expected_carry_frames > codec_delay && trigger_frames > expected_carry_frames,
-        "selected WebM window does not satisfy the delayed-discard CHECK model"
-    );
+    let plan = dual_trigger_plan(&frame_counts, codec_delay, options.trigger_skip)?;
+    let (shared_padding, shared_ns) = discard_padding(plan.shared_skip_frames, sample_rate)?;
+    let (trigger_padding, trigger_ns) = discard_padding(options.trigger_skip, sample_rate)?;
 
     let mut targets = HashMap::new();
-    targets.insert(blocks[first_index].outer.start, first_padding);
-    targets.insert(blocks[second_index].outer.start, second_padding);
+    targets.insert(blocks[0].outer.start, shared_padding.clone());
+    targets.insert(blocks[1].outer.start, shared_padding);
+    targets.insert(blocks[2].outer.start, trigger_padding);
     let rebuilt_segment = mutate_segment(data, segment, &targets)?;
     let mut output =
         Vec::with_capacity(data.len() + rebuilt_segment.len() - (segment.end - segment.start));
@@ -914,22 +939,101 @@ pub fn make_candidate(data: &[u8], options: &WebmOptions) -> Result<(Vec<u8>, se
         "sample_rate": sample_rate,
         "codec_delay_frames": codec_delay,
         "audio_packet_count": blocks.len(),
-        "first_packet": blocks[first_index].index,
-        "second_packet": blocks[second_index].index,
-        "trigger_packet": blocks[trigger_index].index,
-        "middle_output_frames": middle_frames,
-        "trigger_output_frames": trigger_frames,
-        "first_skip_frames": first_skip,
-        "expected_carry_frames": expected_carry_frames,
+        "layout": "dual-immediate-and-delayed",
+        "priming_packet": blocks[0].index,
+        "carrier_packet": blocks[1].index,
+        "trigger_packet": blocks[2].index,
+        "carrier_output_frames": plan.carrier_frames,
+        "trigger_output_frames": plan.trigger_frames,
+        "shared_skip_frames": plan.shared_skip_frames,
+        "trigger_skip_frames": options.trigger_skip,
+        "expected_carry_frames": plan.carried_frames,
         "expected_check": format!(
             "discarded {} > codec_delay {} before a {}-frame trigger packet",
-            expected_carry_frames, codec_delay, trigger_frames
+            plan.carried_frames, codec_delay, plan.trigger_frames
         ),
         "expected_check_fails": true,
-        "first_discard_padding_ns": -first_ns,
-        "second_skip_frames": options.second_skip,
-        "second_discard_padding_ns": -second_ns,
+        "current_no_delay_path": {
+            "packet_0_padding_dropped_without_pcm": true,
+            "large_skip_packet": blocks[1].index,
+            "positive_trigger_packet": blocks[2].index,
+            "check_packet": blocks[2].index,
+            "carried_frames": plan.carried_frames,
+        },
+        "legacy_delayed_path": {
+            "large_skip_source_packet": blocks[0].index,
+            "large_skip_applied_packet": blocks[1].index,
+            "positive_trigger_source_packet": blocks[1].index,
+            "check_packet": blocks[2].index,
+            "carried_frames": plan.carried_frames,
+        },
+        "shared_discard_padding_ns": -shared_ns,
+        "trigger_discard_padding_ns": -trigger_ns,
         "seek_head_and_cues_replaced_with_void": true,
     });
     Ok((output, details))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ID_SEGMENT, WebmOptions, dual_trigger_plan, find_track, make_candidate, parse_audio_blocks,
+        parse_elements,
+    };
+
+    #[test]
+    fn standard_vorbis_window_triggers_both_discard_modes() {
+        let plan = dual_trigger_plan(&[None, Some(576), Some(1024)], 128, 1).unwrap();
+        assert_eq!(plan.carrier_frames, 576);
+        assert_eq!(plan.trigger_frames, 1024);
+        assert_eq!(plan.shared_skip_frames, 577);
+        assert_eq!(plan.carried_frames, 129);
+    }
+
+    #[test]
+    fn rejects_a_trigger_packet_consumed_by_the_carry() {
+        let error = dual_trigger_plan(&[None, Some(576), Some(129)], 128, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must exceed the 129-frame carry"));
+    }
+
+    #[test]
+    fn rejects_a_zero_trigger_skip() {
+        let error = dual_trigger_plan(&[None, Some(576), Some(1024)], 128, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--trigger-skip must be positive"));
+    }
+
+    #[test]
+    fn checked_in_short_control_builds_the_dual_layout_without_changing_packets() {
+        let control = include_bytes!("../samples/short-vorbis-dual-control.webm");
+        let options = WebmOptions {
+            trigger_skip: 1,
+            ..WebmOptions::default()
+        };
+        let (candidate, details) = make_candidate(control, &options).unwrap();
+
+        assert_eq!(candidate.len(), 4206);
+        assert_eq!(details["layout"], "dual-immediate-and-delayed");
+        assert_eq!(details["shared_skip_frames"], 577);
+        assert_eq!(details["expected_carry_frames"], 129);
+        assert_eq!(details["current_no_delay_path"]["check_packet"], 2);
+        assert_eq!(details["legacy_delayed_path"]["check_packet"], 2);
+
+        fn packets(data: &[u8]) -> Vec<Vec<u8>> {
+            let top = parse_elements(data, 0, data.len()).unwrap();
+            let segment = top.iter().find(|element| element.id == ID_SEGMENT).unwrap();
+            let children = parse_elements(data, segment.payload_start, segment.end).unwrap();
+            let track = find_track(data, &children).unwrap();
+            parse_audio_blocks(data, &children, track.number)
+                .unwrap()
+                .into_iter()
+                .map(|block| block.packet)
+                .collect()
+        }
+
+        assert_eq!(packets(control), packets(&candidate));
+    }
 }
