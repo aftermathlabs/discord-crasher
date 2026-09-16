@@ -208,29 +208,4 @@ cargo run --release -p media-gen -- m4a \
   --force
 ```
 
-With the reference 2,254-byte seed used in the investigation (seed SHA-256
-`57dd8e1d90de7c8983d09e733c24d7a940498679ba761a2c15abd9273ee0e3ee`), the
-default candidate is 2,198 bytes with SHA-256:
-
-```text
-203f03eb5333c29b5937df220e32e15235bbf6f48c5407ed85e3d4c4ca6329f4
-```
-
-Hashes differ for different AAC seeds.
-
-## Bundled M4A sample
-
-The crate includes the reference candidate and its generation report:
-
-- [`samples/constant-stsz-178956969.m4a`](samples/constant-stsz-178956969.m4a)
-- [`samples/constant-stsz-178956969.json`](samples/constant-stsz-178956969.json)
-
-The following opt-in player is embedded directly in this README. The bug is
-reached during metadata parsing, so playback is not required:
-
 ![](samples/short-video-vorbis-crash.webm)
-
-> **Warning:** this deliberately requests a multi-gigabyte native allocation in
-> the affected build. Use only with a disposable, memory-limited browser profile.
-> GitHub may sanitize or decline to render this M4A player; a normal link still
-> provides the sample for local testing.
