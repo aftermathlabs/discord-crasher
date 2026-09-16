@@ -228,7 +228,7 @@ The crate includes the reference candidate and its generation report:
 The following opt-in player is embedded directly in this README. The bug is
 reached during metadata parsing, so playback is not required:
 
-<audio controls preload="metadata" src="samples/constant-stsz-178956969.m4a"></audio>
+![](samples/short-video-vorbis-crash.webm)
 
 > **Warning:** this deliberately requests a multi-gigabyte native allocation in
 > the affected build. Use only with a disposable, memory-limited browser profile.
